@@ -1,0 +1,66 @@
+workflows:
+  compile-dfn3-coreml:
+    name: Нативная сборка DFN3 в ONNX и MLMODELC
+    # Жестко заставляем Codemagic выдать нам виртуальный Mac Mini на процессоре Apple M2
+    instance_type: mac_mini_m2
+    max_build_duration: 30
+
+    environment:
+      vars:
+        PYTHON_VERSION: "3.10"
+
+    scripts:
+      - name: 1. Подготовка окружения macOS (Python + Зависимости)
+        script: |
+          echo "=== Установка Python-пакетов ==="
+          pip3 install --upgrade pip
+          pip3 install torch torchvision torchaudio --index-url https://pytorch.org
+          pip3 install onnx onnxruntime coremltools deepfilternet
+
+      - name: 2. Скачивание исходного кода и весов DeepFilterNet3
+        script: |
+          echo "=== Скачивание репозитория для получения файлов конфигурации ==="
+          curl -L https://github.com -o dfn.tar.gz
+          tar -xzf dfn.tar.gz
+          mv DeepFilterNet-0.5.6 deepfilternet_src
+
+      - name: 3. Экспорт модели PyTorch в ONNX
+        script: |
+          echo "=== Генерация ONNX файлов ==="
+          mkdir -p output_onnx
+          deep-filter export --model-base-dir deepfilternet_src/models/DeepFilterNet3 --output-dir output_onnx/
+
+      - name: 4. Конвертация ONNX в Apple CoreML (.mlpackage)
+        script: |
+          echo "=== Конвертация в формат Apple CoreML ==="
+          mkdir -p output_coreml
+          # Запуск Python скрипта для конвертации (генерация промежуточных пакетов)
+          python3 -c "
+          import coremltools as ct
+          import os
+          
+          onnx_files = ['df_enc.onnx', 'df_erbn.onnx', 'df_dec.onnx']
+          for f in onnx_files:
+              onnx_path = os.path.join('output_onnx', f)
+              if os.path.exists(onnx_path):
+                  print(f'Конвертируем {f}...')
+                  mlmodel = ct.converters.onnx.convert(model=onnx_path, minimum_ios_deployment_target='15.0')
+                  mlmodel.save(os.path.join('output_coreml', f.replace('.onnx', '.mlpackage')))
+          "
+
+      - name: 5. Финальная компиляция на Mac в бинарный .mlmodelc
+        script: |
+          echo "=== Компиляция утилитой Xcode coremlcompiler ==="
+          mkdir -p final_binaries
+          
+          # Настоящий Mac вызывает системный компилятор Apple
+          xcrun coremlcompiler compile output_coreml/df_enc.mlpackage final_binaries/
+          xcrun coremlcompiler compile output_coreml/df_erbn.mlpackage final_binaries/
+          xcrun coremlcompiler compile output_coreml/df_dec.mlpackage final_binaries/
+          
+          echo "=== Сборка успешно завершена! ==="
+
+    # Указываем Codemagic, какие папки выдать нам в качестве результата для скачивания
+    artifacts:
+      - output_onnx/*.onnx
+      - final_binaries/*
