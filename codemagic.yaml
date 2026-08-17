@@ -1,6 +1,6 @@
 workflows:
 dfn3-coreml:
-name: DeepFilterNet3 → ONNX → Core ML
+name: DFN3 ONNX to Core ML
 instance_type: mac_mini_m2
 max_build_duration: 120
 
@@ -10,39 +10,14 @@ environment:
 
 scripts:
 
-  # ---------------------------------------------------------
-  # 1. Download DeepFilterNet source
-  # ---------------------------------------------------------
-  - name: Clone DeepFilterNet
-    script: |
-      set -euo pipefail
-
-      rm -rf DeepFilterNet
-
-      git clone --depth 1 \
-        https://github.com/Rikorose/DeepFilterNet.git \
-        DeepFilterNet
-
-      cd DeepFilterNet
-
-      echo "DeepFilterNet commit:"
-      git rev-parse HEAD
-
-      echo "Models:"
-      ls -lh models || true
-
-
-  # ---------------------------------------------------------
-  # 2. Install Python environment
-  # ---------------------------------------------------------
   - name: Install dependencies
     script: |
-      set -euo pipefail
+      set -e
 
       python3 -m venv .venv
       source .venv/bin/activate
 
-      python -m pip install --upgrade pip setuptools wheel
+      python -m pip install --upgrade pip
 
       pip install \
         numpy \
@@ -51,230 +26,197 @@ scripts:
         onnxruntime \
         onnxsim \
         torch \
-        torchvision \
         coremltools
 
-      echo "Python:"
-      python --version
-
-      echo "PyTorch:"
-      python -c "import torch; print(torch.__version__)"
-
-      echo "ONNX:"
-      python -c "import onnx; print(onnx.__version__)"
-
-      echo "CoreMLTools:"
-      python -c "import coremltools; print(coremltools.__version__)"
-
-
-  # ---------------------------------------------------------
-  # 3. Download official DFN3 ONNX model
-  # ---------------------------------------------------------
-  - name: Download DFN3 ONNX
+  - name: Download DeepFilterNet
     script: |
-      set -euo pipefail
+      set -e
+
+      rm -rf DeepFilterNet
+
+      git clone --depth 1 \
+        https://github.com/Rikorose/DeepFilterNet.git \
+        DeepFilterNet
+
+      echo "DeepFilterNet downloaded."
 
       cd DeepFilterNet
 
-      mkdir -p models
+      git rev-parse HEAD
+
+      echo "Repository contents:"
+      find . -maxdepth 2 -type f | sort
+
+  - name: Download DFN3 model
+    script: |
+      set -e
+
+      mkdir -p build
 
       curl -L \
         --fail \
         --retry 5 \
         --retry-all-errors \
-        -o models/DeepFilterNet3_onnx.tar.gz \
+        -o build/dfn3.tar.gz \
         https://github.com/Rikorose/DeepFilterNet/raw/main/models/DeepFilterNet3_onnx.tar.gz
 
-      ls -lh models/DeepFilterNet3_onnx.tar.gz
+      echo "Downloaded archive:"
+      ls -lh build/dfn3.tar.gz
 
-      mkdir -p /tmp/dfn3
+      mkdir -p build/model
 
       tar -xzf \
-        models/DeepFilterNet3_onnx.tar.gz \
-        -C /tmp/dfn3
+        build/dfn3.tar.gz \
+        -C build/model
 
-      echo "Extracted files:"
-      find /tmp/dfn3 -type f -maxdepth 3 -print
+      echo "Extracted DFN3 files:"
+      find build/model -type f | sort
 
-
-  # ---------------------------------------------------------
-  # 4. Copy individual ONNX models
-  # ---------------------------------------------------------
-  - name: Prepare DFN3 ONNX
+  - name: Find ONNX models
     script: |
-      set -euo pipefail
+      set -e
 
-      cd DeepFilterNet
-      source ../.venv/bin/activate
+      echo "Searching for ONNX files..."
 
-      mkdir -p ../build/dfn3
+      find build/model \
+        -type f \
+        -name "*.onnx" \
+        -print
 
-      find /tmp/dfn3 \
+  - name: Prepare ONNX
+    script: |
+      set -e
+
+      mkdir -p build/onnx
+
+      find build/model \
+        -type f \
         -name "enc.onnx" \
-        -exec cp {} ../build/dfn3/enc.onnx \;
+        -exec cp {} build/onnx/enc.onnx \;
 
-      find /tmp/dfn3 \
+      find build/model \
+        -type f \
         -name "erb_dec.onnx" \
-        -exec cp {} ../build/dfn3/erb_dec.onnx \;
+        -exec cp {} build/onnx/erb_dec.onnx \;
 
-      find /tmp/dfn3 \
+      find build/model \
+        -type f \
         -name "df_dec.onnx" \
-        -exec cp {} ../build/dfn3/df_dec.onnx \;
+        -exec cp {} build/onnx/df_dec.onnx \;
 
-      find /tmp/dfn3 \
-        -name "config.ini" \
-        -exec cp {} ../build/dfn3/config.ini \;
+      echo "Prepared files:"
+      ls -lh build/onnx
 
-      test -f ../build/dfn3/enc.onnx
-      test -f ../build/dfn3/erb_dec.onnx
-      test -f ../build/dfn3/df_dec.onnx
+      test -f build/onnx/enc.onnx
+      test -f build/onnx/erb_dec.onnx
+      test -f build/onnx/df_dec.onnx
 
-      ls -lh ../build/dfn3
-
-
-  # ---------------------------------------------------------
-  # 5. Merge DFN3 ONNX models
-  # ---------------------------------------------------------
-  - name: Merge DFN3 ONNX
+  - name: Validate ONNX models
     script: |
-      set -euo pipefail
-
-      cd DeepFilterNet
-      source ../.venv/bin/activate
-
-      python scripts/merge_onnx.py ../build/dfn3
-
-      echo "Merged ONNX:"
-      find ../build/dfn3 -maxdepth 1 -type f -print
-
-      test -f ../build/dfn3/combined.onnx
-
-      cp ../build/dfn3/combined.onnx ../build/dfn3.onnx
-
-      echo "Final ONNX:"
-      ls -lh ../build/dfn3.onnx
-
-
-  # ---------------------------------------------------------
-  # 6. Validate ONNX
-  # ---------------------------------------------------------
-  - name: Validate ONNX
-    script: |
-      set -euo pipefail
+      set -e
 
       source .venv/bin/activate
 
       python <<'PY'
       import onnx
+      import glob
 
-      path = "build/dfn3.onnx"
+      files = glob.glob("build/onnx/*.onnx")
 
-      print("Loading:", path)
+      print("Found ONNX models:", files)
 
-      model = onnx.load(path)
+      for path in files:
+          print("")
+          print("Checking:", path)
 
-      print("ONNX IR version:", model.ir_version)
-      print("Opset:", model.opset_import)
+          model = onnx.load(path)
+          onnx.checker.check_model(model)
 
-      onnx.checker.check_model(model)
+          print("OK")
+          print("Inputs:")
 
-      print("ONNX validation: OK")
+          for x in model.graph.input:
+              print(" ", x.name)
+
+          print("Outputs:")
+
+          for x in model.graph.output:
+              print(" ", x.name)
       PY
 
-
-  # ---------------------------------------------------------
-  # 7. Convert ONNX → MLModel
-  # ---------------------------------------------------------
-  - name: Convert ONNX to Core ML
+  - name: Create ONNX artifact
     script: |
-      set -euo pipefail
+      set -e
+
+      mkdir -p build/output
+
+      cp build/onnx/enc.onnx build/output/dfn3_enc.onnx
+      cp build/onnx/erb_dec.onnx build/output/dfn3_erb_dec.onnx
+      cp build/onnx/df_dec.onnx build/output/dfn3_df_dec.onnx
+
+      echo "ONNX artifacts:"
+      ls -lh build/output
+
+  - name: Convert enc.onnx to Core ML
+    script: |
+      set -e
 
       source .venv/bin/activate
 
       python <<'PY'
       import coremltools as ct
 
-      onnx_path = "build/dfn3.onnx"
-      mlmodel_path = "build/dfn3.mlmodel"
-
-      print("Converting:")
-      print("  ONNX:", onnx_path)
-      print("  Core ML:", mlmodel_path)
+      print("CoreMLTools:", ct.__version__)
 
       model = ct.converters.onnx.convert(
-          model=onnx_path,
-          minimum_ios_deployment_target="16"
+          model="build/onnx/enc.onnx"
       )
 
-      model.save(mlmodel_path)
+      model.save("build/output/dfn3_enc.mlmodel")
 
-      print("Core ML model created")
+      print("Created dfn3_enc.mlmodel")
       PY
 
-      test -f build/dfn3.mlmodel
-
-      ls -lh build/dfn3.mlmodel
-
-
-  # ---------------------------------------------------------
-  # 8. Compile MLModel → MLModelC
-  # ---------------------------------------------------------
-  - name: Compile MLModel
+  - name: Compile Core ML
     script: |
-      set -euo pipefail
+      set -e
 
-      mkdir -p build/coreml
+      mkdir -p build/compiled
 
       xcrun coremlcompiler compile \
-        build/dfn3.mlmodel \
-        build/coreml
+        build/output/dfn3_enc.mlmodel \
+        build/compiled
 
-      echo "Compiled Core ML:"
-      find build/coreml -maxdepth 2 -print
+      echo "Compiled model:"
+      find build/compiled -maxdepth 2 -print
 
-      test -d build/coreml/dfn3.mlmodelc
-
-      mv \
-        build/coreml/dfn3.mlmodelc \
-        build/dfn3.mlmodelc
-
-      echo "Final MLModelC:"
-      find build/dfn3.mlmodelc -maxdepth 2 -print
-
-
-  # ---------------------------------------------------------
-  # 9. Verify everything
-  # ---------------------------------------------------------
-  - name: Verify artifacts
+  - name: Final verification
     script: |
-      set -euo pipefail
+      set -e
 
-      echo ""
-      echo "=============================="
-      echo "DFN3 BUILD RESULTS"
-      echo "=============================="
+      echo "================================"
+      echo "DFN3 BUILD"
+      echo "================================"
 
       echo ""
       echo "ONNX:"
-      ls -lh build/dfn3.onnx
+      ls -lh build/output/*.onnx
 
       echo ""
       echo "MLMODEL:"
-      ls -lh build/dfn3.mlmodel
+      ls -lh build/output/*.mlmodel
 
       echo ""
       echo "MLMODELC:"
-      du -sh build/dfn3.mlmodelc
-      find build/dfn3.mlmodelc -maxdepth 2 -type f -print
+      find build/compiled -type d -name "*.mlmodelc" -print
 
       echo ""
-      echo "=============================="
-      echo "BUILD SUCCESS"
-      echo "=============================="
-
+      echo "================================"
+      echo "SUCCESS"
+      echo "================================"
 
 artifacts:
-  - build/dfn3.onnx
-  - build/dfn3.mlmodel
-  - build/dfn3.mlmodelc/**
+  - build/output/*.onnx
+  - build/output/*.mlmodel
+  - build/compiled/**/*.mlmodelc/**
 ```
