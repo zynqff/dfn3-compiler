@@ -1,79 +1,85 @@
 workflows:
-  compile-dfn3-coreml:
-    name: Нативная сборка DFN3 в ONNX и MLMODELC
+  dfn3-coreml:
+    name: DFN3 → ONNX → Core ML
     instance_type: mac_mini_m2
-    max_build_duration: 30
+    max_build_duration: 120
+
+    environment:
+      xcode: latest
 
     scripts:
-      - name: 1. Настройка Python 3.10 и установка Rust
+      - name: Install Python dependencies
         script: |
-          echo "=== Переключение на Python 3.10 ==="
-          pyenv global 3.10
-          python3 --version
-          
-          echo "=== Установка Rust Toolchain ==="
-          curl --proto '=https' --tlsv1.2 -sSf https://rustup.rs | sh -s -- -y
-          source "$HOME/.cargo/env"
-          cargo --version
+          set -e
 
-      - name: 2. Подготовка окружения macOS (Зависимости)
-        script: |
-          echo "=== Инициализация окружения ==="
-          pyenv global 3.10
-          source "$HOME/.cargo/env"
-          
-          echo "=== Установка Python-пакетов ==="
-          pip3 install --upgrade pip
-          pip3 install torch torchvision torchaudio
-          pip3 install onnx onnxruntime coremltools deepfilternet
+          python3 -m venv .venv
+          source .venv/bin/activate
 
-      - name: 3. Скачивание исходного кода и весов DeepFilterNet3
-        script: |
-          echo "=== Скачивание репозитория для получения файлов конфигурации ==="
-          curl -L https://github.com -o dfn.tar.gz
-          tar -xzf dfn.tar.gz
-          mv DeepFilterNet-0.5.6 deepfilternet_src
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-      - name: 4. Экспорт модели PyTorch в ONNX
-        script: |
-          echo "=== Инициализация окружения ==="
-          pyenv global 3.10
-          
-          echo "=== Генерация ONNX файлов ==="
-          mkdir -p output_onnx
-          deep-filter export --model-base-dir deepfilternet_src/models/DeepFilterNet3 --output-dir output_onnx/
+          # Если coremltools нет в requirements.txt:
+          pip install coremltools
 
-      - name: 5. Конвертация ONNX в Apple CoreML (.mlpackage)
+      - name: Export DFN3 to ONNX
         script: |
-          echo "=== Инициализация окружения ==="
-          pyenv global 3.10
-          
-          echo "=== Конвертация в формат Apple CoreML ==="
-          mkdir -p output_coreml
-          python3 -c "
+          set -e
+          source .venv/bin/activate
+
+          mkdir -p build
+
+          python export_onnx.py \
+            --output build/dfn3.onnx
+
+          test -f build/dfn3.onnx
+
+      - name: Convert ONNX to Core ML
+        script: |
+          set -e
+          source .venv/bin/activate
+
+          python <<'PY'
           import coremltools as ct
-          import os
-          
-          onnx_files = ['df_enc.onnx', 'df_erbn.onnx', 'df_dec.onnx']
-          for f in onnx_files:
-              onnx_path = os.path.join('output_onnx', f)
-              if os.path.exists(onnx_path):
-                  print(f'Конвертируем {f}...')
-                  mlmodel = ct.converters.onnx.convert(model=onnx_path, minimum_ios_deployment_target='15.0')
-                  mlmodel.save(os.path.join('output_coreml', f.replace('.onnx', '.mlpackage')))
-          "
 
-      - name: 6. Финальная компиляция на Mac в бинарный .mlmodelc
+          print("Converting build/dfn3.onnx...")
+
+          model = ct.converters.onnx.convert(
+              model="build/dfn3.onnx"
+          )
+
+          model.save("build/dfn3.mlmodel")
+
+          print("Created build/dfn3.mlmodel")
+          PY
+
+          test -f build/dfn3.mlmodel
+
+      - name: Compile MLModel to MLModelC
         script: |
-          echo "=== Компиляция утилитой Xcode coremlcompiler ==="
-          mkdir -p final_binaries
-          
-          xcrun coremlcompiler compile output_coreml/df_enc.mlpackage final_binaries/
-          xcrun coremlcompiler compile output_coreml/df_erbn.mlpackage final_binaries/
-          xcrun coremlcompiler compile output_coreml/df_dec.mlpackage final_binaries/
-          
-          echo "=== Сборка успешно завершена! ==="
+          set -e
+
+          mkdir -p build/dfn3.mlmodelc
+
+          xcrun coremlc compile \
+            build/dfn3.mlmodel \
+            build/
+
+          test -d build/dfn3.mlmodelc
+
+      - name: Verify artifacts
+        script: |
+          set -e
+
+          echo "=== ONNX ==="
+          ls -lh build/dfn3.onnx
+
+          echo "=== MLModel ==="
+          ls -lh build/dfn3.mlmodel
+
+          echo "=== MLModelC ==="
+          find build/dfn3.mlmodelc -maxdepth 2 -type f -print
 
     artifacts:
-      - output_onnx/*.onnx
-      - final_binaries/*
+      - build/dfn3.onnx
+      - build/dfn3.mlmodel
+      - build/dfn3.mlmodelc/**
